@@ -94,7 +94,7 @@ class UTF:
                 try:
                     strings_copy[i] = strings[i].decode("utf-8")
                 except:
-                    for x in ["shift-jis", "utf-16"]:
+                    for x in ["gbk", "shift-jis", "utf-16"]:
                         try:
                             strings_copy[i] = strings[i].decode(x)
                             self.encoding = x
@@ -104,7 +104,7 @@ class UTF:
                             continue
                     else:
                         # Probably useless.
-                        raise UnicodeDecodeError(f"String of unknown encoding: {strings[i]}")
+                        raise ValueError(f"String of unknown encoding: {strings[i]}")
         t_t_dict = dict()
         self.table_name = strings_copy[self.finder(self.table_name, strings)]
         UTFTypeValuesList = list(UTFTypeValues)
