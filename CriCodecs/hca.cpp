@@ -2226,8 +2226,8 @@ unsigned int CalculateBitrate(clHCA &hca, CriHcaQuality quality){
             break;
     }
     unsigned int bitrate = pcmBitrate / compressionRatio;
-    if(bitrate < 0)
-        bitrate = 0;
+    if(bitrate < minBitrate)
+        bitrate = minBitrate;
     else if(bitrate > maxBitrate)
         bitrate = maxBitrate;
     return bitrate;
@@ -2235,7 +2235,7 @@ unsigned int CalculateBitrate(clHCA &hca, CriHcaQuality quality){
 
 void CalculateBandCounts(clHCA &hca, unsigned int bitrate, unsigned int cutoffFrequency){
     hca.frame_size = bitrate * 1024 / hca.sample_rate / 8;
-    unsigned int numGroups = 0;\
+    unsigned int numGroups = 0;
     unsigned int pcmBitrate = hca.sample_rate * hca.channels * 16;
     unsigned int hfrRatio;
     unsigned int cutoffRatio;
@@ -2251,9 +2251,9 @@ void CalculateBandCounts(clHCA &hca, unsigned int bitrate, unsigned int cutoffFr
     if(bitrate < pcmBitrate / cutoffRatio)
         cutoffFrequency = std::min(cutoffFrequency, cutoffRatio * bitrate / (32 * hca.channels));
 
-    unsigned int totalBandCount = (unsigned int)round(cutoffFrequency * 256.0 / hca.sample_rate);
+    unsigned int totalBandCount = (unsigned int)round((double)cutoffFrequency * 256.0 / hca.sample_rate);
 
-    unsigned int hfrStartBand = (unsigned int)std::min(totalBandCount, (unsigned int)round((hfrRatio * bitrate * 128.0) / pcmBitrate));
+    unsigned int hfrStartBand = (unsigned int)std::min(totalBandCount, (unsigned int)round(((double)hfrRatio * bitrate * 128.0) / pcmBitrate));
     unsigned int stereoStartBand = hfrRatio == 6 ? hfrStartBand : (hfrStartBand + 1) / 2;
 
     unsigned int hfrBandCount = totalBandCount - hfrStartBand;
@@ -2272,7 +2272,7 @@ void CalculateBandCounts(clHCA &hca, unsigned int bitrate, unsigned int cutoffFr
 void CalculateHfrValues(clHCA &hca){
     if (hca.bands_per_hfr_group <= 0)
         return;
-    hca.HfrBandCount = hca.total_band_count - hca.base_band_count - hca.base_band_count;
+    hca.HfrBandCount = hca.total_band_count - hca.base_band_count - hca.stereo_band_count;
     hca.hfr_group_count = DivideByRoundUp(hca.HfrBandCount, hca.bands_per_hfr_group);
 }
 
@@ -2323,7 +2323,7 @@ void CalculateHeaderSize(clHCA &hca){
 void GetChannelTypes(clHCA &hca, channel_type_t *types){
     int channelsPerTrack = hca.channels / hca.track_count;
     if(hca.stereo_band_count == 0 || channelsPerTrack == 1){
-        memset(types, DISCRETE, 8);
+        memset(types, DISCRETE, 8 * sizeof(channel_type_t));
         return;
     }
 
@@ -2395,8 +2395,7 @@ void GetChannelTypes(clHCA &hca, channel_type_t *types){
             types[7] = STEREO_SECONDARY;
             break;
         default: 
-            types = new channel_type_t[8];
-            memset(types, DISCRETE, 8);
+            memset(types, DISCRETE, 8 * sizeof(channel_type_t));
             break;
     }
 }
@@ -2424,7 +2423,7 @@ char initHCAEncode(PCM &wave, clHCA &hca, CriHcaQuality quality){
         hca.track_count = 1;
         hca.sample_rate = FMTChunk.SampleRate;
         hca.sample_count_per_channel = wave.ColumnSize / FMTChunk.Channels;
-        hca.min_resolution = 1;
+        hca.min_resolution = 1; // in >=v3 this can be 0. 
         hca.max_resolution = 15;
         hca.encoder_delay = HCA_SAMPLES_PER_SUBFRAME;
     }
@@ -3036,19 +3035,20 @@ void EncodeMainAudio(clHCA &hca, short *pcm, unsigned char *HcaBuffer, unsigned 
 void EncodePostAudio(clHCA &hca, short* PcmAudio, unsigned char* HcaBuffer, unsigned int &framesOutput, unsigned int &FramesProcessed, short *PostAudio, unsigned int PostAudioLengthPerChannel){
     unsigned int postPos = 0;
     unsigned int remaining = hca.PostSamples;
+    unsigned int PostAudioFramesOutput = framesOutput;
 
     while(postPos < remaining){
         unsigned int toCopy = std::min((long long)HCA_SAMPLES_PER_FRAME - hca.BufferPosition, (long long)remaining - postPos);
         memcpy(PcmAudio+hca.BufferPosition*hca.channels, PostAudio+postPos*hca.channels, toCopy*hca.channels*sizeof(short));
         hca.BufferPosition += toCopy;
         postPos += toCopy;
-        framesOutput = OutputFrame(framesOutput, HcaBuffer+hca.frame_size*framesOutput, FramesProcessed, hca, PcmAudio);
+        framesOutput = OutputFrame(framesOutput, HcaBuffer+hca.frame_size*(framesOutput - PostAudioFramesOutput), FramesProcessed, hca, PcmAudio);
     }
 
     while(FramesProcessed < hca.frame_count){
         memset(PcmAudio+hca.BufferPosition*hca.channels, 0, (HCA_SAMPLES_PER_FRAME - hca.BufferPosition) * hca.channels * sizeof(short));
         hca.BufferPosition = HCA_SAMPLES_PER_FRAME;
-        framesOutput = OutputFrame(framesOutput, HcaBuffer+hca.frame_size*framesOutput, FramesProcessed, hca, PcmAudio);
+        framesOutput = OutputFrame(framesOutput, HcaBuffer+hca.frame_size*(framesOutput - PostAudioFramesOutput), FramesProcessed, hca, PcmAudio);
     }
 }
 
@@ -3097,11 +3097,13 @@ void Encode(clHCA &hca, PCM &pcm, unsigned char *HcaBuffer){
         SamplesToEncode = std::min(SampleCount - i * HCA_SAMPLES_PER_FRAME, (unsigned int)HCA_SAMPLES_PER_FRAME) * hca.channels;
         HcaEncode(hca, PcmBuffer+PcmPosition, HcaBuffer+HcaPosition, framesOutput, SamplesProcessed, SamplesToEncode, PostAudio, PostAudioLengthPerChannel, FramesProcessed, LoopStartSample, LoopEndSample, PcmAudio);
         if(HcaErrorCode < 0)
-            return;
+            break;
         HcaPosition += hca.frame_size * framesOutput;
         FrameIndex += framesOutput;
         framesOutput = 0;
     }
+    delete[] PostAudio;
+    delete[] PcmAudio;
 }
 
 void PackHeader(clHCA &hca, unsigned char* HcaBuffer){
@@ -3449,13 +3451,16 @@ static PyObject* HcaDecode(PyObject* self, PyObject* args){
         }
     }
     free(hca);
-    return Py_BuildValue("y#", wavebuf, wavriff->size+8);
+    delete[] buf;
+    delete[] sample_buffer;
+    return Py_BuildValue("y#", wavebuf, wavriff->size+8); // wavbuf will be deleted by the PCM module.
 }
 
 static PyObject* HcaEncode(PyObject* self, PyObject* args){
     Py_buffer *pydata;
     unsigned int force_nolooping;
-    if(!PyArg_ParseTuple(args, "y*I", &pydata, &force_nolooping)){
+    unsigned int quality;
+    if(!PyArg_ParseTuple(args, "y*II", &pydata, &force_nolooping, &quality)){
         return NULL;
     }
     unsigned char *data = (unsigned char *)pydata;
@@ -3467,7 +3472,7 @@ static PyObject* HcaEncode(PyObject* self, PyObject* args){
         return (PyObject *)NULL;
     }
     hca.loop_flag = w.wav.chunks.Looping && !force_nolooping;
-    res = initHCAEncode(w, hca, High);
+    res = initHCAEncode(w, hca, (CriHcaQuality)quality);
     if(res < 0){
         return py_codec_err(-3);
     }
@@ -3478,5 +3483,7 @@ static PyObject* HcaEncode(PyObject* self, PyObject* args){
         return py_codec_err(-4);
     }
     PackHeader(hca, HcaBuffer);
-    return Py_BuildValue("y#", HcaBuffer, hca.header_size + hca.frame_count * hca.frame_size);
+    PyObject* ret_val = Py_BuildValue("y#", HcaBuffer, hca.header_size + hca.frame_count * hca.frame_size);
+    delete[] HcaBuffer;
+    return ret_val;
 }
